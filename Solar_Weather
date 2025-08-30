@@ -1,0 +1,165 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// ==== OLED Setup ====
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ==== WiFi Setup ====
+const char* ssid     = "YOUR_SSID";
+const char* password = "YOUR_PASSWORD";
+
+// ==== NOAA API URLs ====
+const char* kp_url   = "https://services.swpc.noaa.gov/json/planetary_k_index_1m.json";
+const char* sw_url   = "https://services.swpc.noaa.gov/products/solar-wind/plasma-2-hour.json";
+
+// ==== Global Values ====
+float kp_index       = -1;
+float solar_speed    = -1;
+float solar_density  = -1;
+float solar_temp     = -1;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(7, 6);  // SDA=7, SCL=6 for ESP32-C3
+
+  // Start OLED
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("SSD1306 allocation failed");
+    for(;;);
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Connect WiFi
+  WiFi.begin(ssid, password);
+  display.setCursor(0,0);
+  display.println("Connecting WiFi...");
+  display.display();
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    display.clearDisplay();
+    display.setCursor(0,0);
+    display.println("WiFi failed!");
+    display.display();
+    return;
+  }
+  
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("WiFi connected!");
+  display.display();
+  delay(1000);
+}
+
+void loop() {
+  fetchKP();
+  fetchSolarWind();
+  showData();
+  delay(60000); // update every minute
+}
+
+// ==== Fetch Kp Index ====
+void fetchKP() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(kp_url);
+    int httpCode = http.GET();
+    
+    if (httpCode == 200) {
+      String payload = http.getString();
+      DynamicJsonDocument doc(4096);
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (!error && doc.size() > 0) {
+        JsonObject lastEntry = doc[doc.size()-1];
+        kp_index = lastEntry["kp_index"].as<float>();
+      } else {
+        kp_index = -1;
+      }
+    } else {
+      kp_index = -1;
+    }
+    http.end();
+  }
+}
+
+// ==== Fetch Solar Wind ====
+void fetchSolarWind() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(sw_url);
+    int httpCode = http.GET();
+    
+    if (httpCode == 200) {
+      String payload = http.getString();
+      DynamicJsonDocument doc(8192);
+      DeserializationError error = deserializeJson(doc, payload);
+      
+      if (!error && doc.size() > 1) {
+        JsonArray last = doc[doc.size()-1];
+        if (last.size() > 3) {
+          solar_density = last[1].as<float>();   // Proton density
+          solar_speed   = last[2].as<float>();   // Solar wind speed
+          solar_temp    = last[3].as<float>();   // Proton temperature
+        }
+      }
+    } else {
+      solar_speed = -1;
+      solar_density = -1;
+      solar_temp = -1;
+    }
+    http.end();
+  }
+}
+
+// ==== Show Data on OLED ====
+void showData() {
+  display.clearDisplay();
+
+  display.setCursor(0,0);
+  display.print("Kp Index: ");
+  if (kp_index >= 0) display.println(kp_index, 1);
+  else display.println("N/A");
+
+  display.setCursor(0,16);
+  display.print("Wind: ");
+  if (solar_speed >= 0) {
+    display.print(solar_speed, 0);
+    display.println(" km/s");
+  } else display.println("N/A");
+
+  display.setCursor(0,32);
+  display.print("Density: ");
+  if (solar_density >= 0) {
+    display.print(solar_density, 1);
+    display.println(" p/cm3");
+  } else display.println("N/A");
+
+  display.setCursor(0,48);
+  display.print("Temp: ");
+  if (solar_temp >= 0) {
+    display.print(solar_temp/1000, 0); // display in thousands K
+    display.println("k K");
+  } else display.println("N/A");
+
+  display.display();
+
+  // Debug log
+  Serial.print("Kp: "); Serial.println(kp_index);
+  Serial.print("Solar Wind: "); Serial.print(solar_speed); Serial.println(" km/s");
+  Serial.print("Density: "); Serial.print(solar_density); Serial.println(" p/cm3");
+  Serial.print("Temperature: "); Serial.print(solar_temp); Serial.println(" K");
+}
